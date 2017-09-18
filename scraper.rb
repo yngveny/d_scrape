@@ -1,25 +1,65 @@
-# This is a template for a Ruby scraper on morph.io (https://morph.io)
-# including some code snippets below that you should find helpful
+# A Mechanize based Sidekiq Worker that reports on new bid announcements in Norway
+#
+# This is used in a Rails app with a Bid model for storing known bids,
+# and a BidMailer to send bid announcements to an email.
+#
+class BidWorker
+  include Sidekiq::Worker
+  sidekiq_options unique: true
 
-# require 'scraperwiki'
-# require 'mechanize'
-#
-# agent = Mechanize.new
-#
-# # Read in a page
-# page = agent.get("http://foo.com")
-#
-# # Find somehing on the page using css selectors
-# p page.at('div.content')
-#
-# # Write out to the sqlite database using scraperwiki library
-# ScraperWiki.save_sqlite(["name"], {"name" => "susan", "occupation" => "software developer"})
-#
-# # An arbitrary query against the database
-# ScraperWiki.select("* from data where 'name'='peter'")
+  def perform
+    started_at = Time.now
+    agent = Mechanize.new
 
-# You don't have to do things with the Mechanize or ScraperWiki libraries.
-# You can use whatever gems you want: https://morph.io/documentation/ruby
-# All that matters is that your final data is written to an SQLite database
-# called "data.sqlite" in the current working directory which has at least a table
-# called "data".
+    cpv = [15100000, 15110000, 15112000, 15130000, 15131000, 15131700, 15894600]
+
+    url = "https://www.doffin.no"
+    path  = "/Notice?NoticeType=2&IncludeExpired=false&Cpvs=#{cpv.join("+")}"
+
+    agent.get(url+path)
+
+    doc = Nokogiri::HTML(agent.page.content)
+
+    # Fix links
+    doc.xpath("//*[@href]").each do |lnk|
+      dest = lnk.attributes["href"].value
+      lnk.attributes["href"].value = url + dest
+      lnk.remove if dest == "#"
+    end
+
+    bids = doc.css(".notice-search-item")
+
+    # Clean up markup
+    bids.each do |bid|
+      bid.xpath('//script').remove
+      bid.xpath('//img').remove
+      bid.at_css('i').parent.remove
+      bid.xpath('//*[@class="inline"]').each do |div|
+        div.attributes["class"].remove
+        div["style"] = "padding-left: 1em;"
+      end
+    end
+
+    new_bids = []
+
+    # Build the Bid
+    bids.each do |bd|
+      html = bd.to_html
+      ref = html =~ /Doffin referanse/
+      pref = html[ref..ref+28]
+
+      bid = Bid.find_or_initialize_by(reference: pref)
+      if bid.new_record?
+        bid.html = html
+        bid.save
+        new_bids << bid
+      end
+    end
+
+    # Send email
+    mail = BidMailer.send_bids("anbud@eksempel.no", new_bids, url+path)
+    mail.deliver unless new_bids.empty?
+
+    logger.info "Time spent #{Time.now - started_at}"
+  end
+end
