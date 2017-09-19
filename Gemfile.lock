@@ -38,6 +38,7 @@ GEM
       unf_ext
     unf_ext (0.0.7.1)
     webrobots (0.1.1)
+    sidekiq (5.0.4)
 
 PLATFORMS
   ruby
